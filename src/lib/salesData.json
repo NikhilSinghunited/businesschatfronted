@@ -1,0 +1,30 @@
+
+{
+  "monthlySales": [
+    { "month": "January", "sales": 12000, "growth": 15 },
+    { "month": "February", "sales": 18000, "growth": 20 },
+    { "month": "March", "sales": 15000, "growth": 8 },
+    { "month": "April", "sales": 21000, "growth": 25 },
+    { "month": "May", "sales": 24000, "growth": 30 },
+    { "month": "June", "sales": 19500, "growth": 18 },
+    { "month": "July", "sales": 22500, "growth": 22 },
+    { "month": "August", "sales": 27000, "growth": 35 },
+    { "month": "September", "sales": 25500, "growth": 28 },
+    { "month": "October", "sales": 30000, "growth": 42 },
+    { "month": "November", "sales": 33000, "growth": 50 },
+    { "month": "December", "sales": 36000, "growth": 60 }
+  ],
+  "products": [
+    { "name": "Product A", "sales": 45000, "marketShare": 35 },
+    { "name": "Product B", "sales": 32000, "marketShare": 25 },
+    { "name": "Product C", "sales": 28000, "marketShare": 22 },
+    { "name": "Product D", "sales": 15000, "marketShare": 12 },
+    { "name": "Product E", "sales": 8000, "marketShare": 6 }
+  ],
+  "quarterlyPerformance": [
+    { "quarter": "Q1", "revenue": 45000, "target": 40000 },
+    { "quarter": "Q2", "revenue": 64500, "target": 60000 },
+    { "quarter": "Q3", "revenue": 75000, "target": 70000 },
+    { "quarter": "Q4", "revenue": 99000, "target": 90000 }
+  ]
+}
