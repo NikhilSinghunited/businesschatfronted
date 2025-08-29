@@ -1,10 +1,21 @@
+// src/App.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import ChatMessage from "./components/ChatMessage";
-import PendingInstall from "./components/PendingInstall";
-import { requestInstall, createTicket, showStatus } from "./lib/api";
-import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, LineElement, PointElement, Title, Tooltip, Legend, ArcElement } from 'chart.js';
-import { Bar, Line, Pie } from 'react-chartjs-2';
-import salesData from './lib/salesData.json';
+import { queryChatbot } from "./lib/api";
+
+import {
+  Chart as ChartJS,
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  LineElement,
+  PointElement,
+  Title,
+  Tooltip,
+  Legend,
+  ArcElement,
+} from "chart.js";
+import { Bar, Line, Pie } from "react-chartjs-2";
 
 // Register ChartJS components
 ChartJS.register(
@@ -22,12 +33,8 @@ ChartJS.register(
 const SYSTEM_RULES = `Title: Conversational Sales Insights with Northwind DB.
 
 Rules:
-- If the user asks to 'install' or' 'setup' software, ALWAYS call request_install first.
-- If that returns multiple versions, show them and wait for the user's choice.
-- If exactly one match, proceed (backend may create the ticket).
-- If no match, backend creates a ticket automatically.
-- If the user asks about an incident (INC...), call show_status.
-- If the user asks about sales data, business metrics, or requests a chart, show the appropriate visualization.
+- If the user asks about sales data, business metrics, or requests a chart, call the /chatbot/query API.
+- Prefer showing a relevant visualization when the user mentions month/quarter/product.
 `;
 
 function loadHistory() {
@@ -35,7 +42,11 @@ function loadHistory() {
   if (!raw) {
     return [
       { role: "system", content: SYSTEM_RULES },
-      { role: "assistant", content: "Hi! I'm your IT assistant. How can I help you today?" },
+      {
+        role: "assistant",
+        content:
+          "Hi! I’m your Sales Insights assistant. Ask me about sales, revenue, products, or trends.",
+      },
     ];
   }
   try {
@@ -45,112 +56,152 @@ function loadHistory() {
   }
 }
 
-// Chart components
-const MonthlySalesChart = () => {
-  const data = {
-    labels: salesData.monthlySales.map(item => item.month),
-    datasets: [
-      {
-        label: 'Monthly Sales ($)',
-        data: salesData.monthlySales.map(item => item.sales),
-        backgroundColor: 'rgba(54, 162, 235, 0.5)',
-        borderColor: 'rgba(54, 162, 235, 1)',
-        borderWidth: 2,
-      },
-    ],
-  };
+/* ---------- Helpers to render API results ---------- */
+function buildChartJsSpec(spec) {
+  const type = (spec?.type || "bar").toLowerCase();
+  const labels = Array.isArray(spec?.labels) ? spec.labels : [];
+  const rawValues = Array.isArray(spec?.values) ? spec.values : [];
 
-  const options = {
-    responsive: true,
-    plugins: {
-      legend: {
-        position: 'top',
-      },
-      title: {
-        display: true,
-        text: 'Monthly Sales Performance',
-      },
+  // Coerce to numbers; if non-numeric, count = 1 per label
+  const numeric = rawValues.map((v) => (typeof v === "number" ? v : Number(v)));
+  const allNums = numeric.every((n) => Number.isFinite(n));
+  const dataValues = allNums ? numeric : labels.map(() => 1);
+
+  return {
+    type,
+    data: {
+      labels,
+      datasets: [
+        {
+          label: allNums ? "Value" : "Count",
+          data: dataValues,
+          borderWidth: 1,
+        },
+      ],
     },
+    options:
+      type === "bar" || type === "line"
+        ? {
+            responsive: true,
+            plugins: {
+              legend: { position: "top" },
+              title: { display: !!spec?.title, text: spec?.title || "" },
+            },
+            scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+          }
+        : {
+            responsive: true,
+            plugins: {
+              legend: { position: "top" },
+              title: { display: !!spec?.title, text: spec?.title || "" },
+            },
+          },
   };
+}
 
+function GenericChart({ spec }) {
+  if (!spec) return null;
+  const { type, data, options } = buildChartJsSpec(spec);
+  if (type === "pie") return <Pie data={data} options={options} />;
+  if (type === "line") return <Line data={data} options={options} />;
   return <Bar data={data} options={options} />;
-};
+}
 
-const ProductSalesChart = () => {
-  const data = {
-    labels: salesData.products.map(item => item.name),
-    datasets: [
-      {
-        label: 'Product Sales ($)',
-        data: salesData.products.map(item => item.sales),
-        backgroundColor: [
-          'rgba(255, 99, 132, 0.5)',
-          'rgba(54, 162, 235, 0.5)',
-          'rgba(255, 206, 86, 0.5)',
-          'rgba(75, 192, 192, 0.5)',
-          'rgba(153, 102, 255, 0.5)',
-        ],
-        borderColor: [
-          'rgba(255, 99, 132, 1)',
-          'rgba(54, 162, 235, 1)',
-          'rgba(255, 206, 86, 1)',
-          'rgba(75, 192, 192, 1)',
-          'rgba(153, 102, 255, 1)',
-        ],
-        borderWidth: 1,
-      },
-    ],
-  };
+function ApiPayloadRenderer({ payload }) {
+  if (!payload) return null;
 
-  return <Pie data={data} />;
-};
+  const rows = Array.isArray(payload.data) ? payload.data : [];
+  const hasRows = rows.length > 0;
+  const columns = hasRows ? Object.keys(rows[0]) : [];
 
-const QuarterlyPerformanceChart = () => {
-  const data = {
-    labels: salesData.quarterlyPerformance.map(item => item.quarter),
-    datasets: [
-      {
-        label: 'Actual Revenue',
-        data: salesData.quarterlyPerformance.map(item => item.revenue),
-        borderColor: 'rgb(53, 162, 235)',
-        backgroundColor: 'rgba(53, 162, 235, 0.5)',
-        yAxisID: 'y',
-      },
-      {
-        label: 'Target',
-        data: salesData.quarterlyPerformance.map(item => item.target),
-        borderColor: 'rgb(255, 99, 132)',
-        backgroundColor: 'rgba(255, 99, 132, 0.5)',
-        type: 'line',
-        yAxisID: 'y',
-      },
-    ],
-  };
+  const isSingleCol = hasRows && columns.length === 1;
+  const singleColName = isSingleCol ? columns[0] : null;
 
-  const options = {
-    responsive: true,
-    interaction: {
-      mode: 'index',
-      intersect: false,
-    },
-    scales: {
-      y: {
-        type: 'linear',
-        display: true,
-        position: 'left',
-      },
-    },
-  };
+  return (
+    <div className="mt-2 space-y-4">
+      {/* Summary */}
+      {(payload.summary || payload.answer) && (
+        <div className="rounded-xl border border-gray-200 bg-white p-3">
+          <div className="font-semibold mb-1">Summary</div>
+          <div className="text-sm leading-relaxed">
+            {payload.summary || payload.answer}
+          </div>
+        </div>
+      )}
 
-  return <Bar data={data} options={options} />;
-};
+      {/* Chart from API */}
+      {payload.chart && (
+        <div className="rounded-xl border border-gray-200 bg-white p-4">
+          <div className="font-semibold mb-2">Chart</div>
+          <GenericChart spec={payload.chart} />
+        </div>
+      )}
 
+      {/* Single-column friendly list */}
+      {isSingleCol && (
+        <div className="rounded-xl border border-gray-200 bg-white p-3">
+          <div className="font-semibold mb-1">{singleColName}</div>
+          <ul className="list-disc pl-5">
+            {rows.map((r, i) => (
+              <li key={i}>{String(r[singleColName])}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Full table */}
+      {hasRows && (
+        <div className="rounded-xl border border-gray-200 overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead className="bg-gray-50">
+              <tr>
+                {columns.map((c) => (
+                  <th
+                    key={c}
+                    className="px-3 py-2 text-left font-semibold border-b"
+                  >
+                    {c}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, i) => (
+                <tr key={i} className={i % 2 ? "bg-gray-50" : "bg-white"}>
+                  {columns.map((c) => (
+                    <td key={c} className="px-3 py-2 border-b">
+                      {String(row[c])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* SQL (optional) */}
+      {payload.sql && (
+        <div className="rounded-xl border border-gray-200 bg-white p-3">
+          <div className="font-semibold mb-1">SQL</div>
+          <pre className="text-xs whitespace-pre-wrap">{payload.sql}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------- App ---------- */
 export default function App() {
   const [messages, setMessages] = useState(loadHistory);
   const [input, setInput] = useState("");
-  const [pending, setPending] = useState(null); // {user_query, options:[]}
   const [thinking, setThinking] = useState(false);
-  const [showChart, setShowChart] = useState(null); // 'monthly', 'products', 'quarterly'
+
+  // fallback static chart type (only if backend doesn't send chart)
+  const [showChart, setShowChart] = useState(null); // 'monthly' | 'products' | 'quarterly' | null
+  const [lastPayload, setLastPayload] = useState(null); // full API response
+  const [errorMsg, setErrorMsg] = useState("");
+
   const bottomRef = useRef(null);
 
   useEffect(() => {
@@ -159,88 +210,52 @@ export default function App() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, pending, showChart]);
+  }, [messages, showChart, lastPayload]);
 
-  // Check if user is asking for sales data or charts
+  // Simple heuristic to hint chart type to backend
   const checkForChartRequest = (query) => {
-    const lowerQuery = query.toLowerCase();
-    
-    if (lowerQuery.includes('sales') || lowerQuery.includes('revenue')) {
-      if (lowerQuery.includes('month') || lowerQuery.includes('monthly')) {
-        return 'monthly';
-      } else if (lowerQuery.includes('product') || lowerQuery.includes('item')) {
-        return 'products';
-      } else if (lowerQuery.includes('quarter') || lowerQuery.includes('q1') || lowerQuery.includes('q2') || lowerQuery.includes('q3') || lowerQuery.includes('q4')) {
-        return 'quarterly';
-      } else if (lowerQuery.includes('chart') || lowerQuery.includes('graph') || lowerQuery.includes('visual')) {
-        return 'monthly'; // default to monthly sales chart
-      }
+    const lower = query.toLowerCase();
+    if (lower.includes("sales") || lower.includes("revenue")) {
+      if (lower.includes("month") || lower.includes("monthly")) return "monthly";
+      if (lower.includes("product") || lower.includes("item")) return "products";
+      if (lower.includes("quarter") || /\bq[1-4]\b/.test(lower)) return "quarterly";
+      if (lower.includes("chart") || lower.includes("graph") || lower.includes("visual"))
+        return "monthly";
     }
-    
     return null;
   };
 
-  // ---- UPDATED TOOL DECIDER ----
   const decideAndCallTool = useMemo(
     () => async (query) => {
-      // Check for chart requests first
-      const chartType = checkForChartRequest(query);
-      if (chartType) {
-        setShowChart(chartType);
-        return `Here's the ${chartType} sales data you requested:`;
-      }
-      
-      // Reset chart display for non-chart requests
-      setShowChart(null);
-
-      // 1) Incident check
-      const incMatch = query.match(/\bINC\d+\b/i);
-      if (incMatch) {
-        try {
-          const inc = incMatch[0].toUpperCase();
-          const data = await showStatus(inc);
-          // safety: if any pending UI is open, close it
-          setPending(null);
-          return `Incident ${inc} status: ${data.incident_status ?? "Unknown"}`;
-        } catch (e) {
-          return `Error while checking status: ${e?.response?.data || e.message}`;
-        }
-      }
-
-      // 2) install/setup path
-      if (/\b(install|setup|set up)\b/i.test(query)) {
-        try {
-          const data = await requestInstall(query, null);
-
-          // ✅ If backend directly created a ticket, hide dropdown
-          if (data && typeof data === "object" && data.incident) {
-            setPending(null);
-            return JSON.stringify(data, null, 2);
-          }
-
-          // ✅ Show dropdown ONLY when options > 1
-          if (Array.isArray(data?.options) && data.options.length > 1) {
-            setPending({ user_query: query, options: data.options });
-            return data.message || "Multiple versions found. Please choose one.";
-          }
-
-          // If single/zero options but no incident in payload, just show message
-          setPending(null);
-          return JSON.stringify(data, null, 2);
-        } catch (e) {
-          setPending(null);
-          return `Error while searching software: ${e?.response?.data || e.message}`;
-        }
-      }
-
-      // 3) generic ticket
       try {
-        const data = await createTicket(query);
-        setPending(null);
-        return `Ticket ${data.incident} created for: ${query}`;
+        setErrorMsg("");
+        const inferredChart = checkForChartRequest(query);
+
+        const data = await queryChatbot(query, inferredChart ?? "auto");
+        setLastPayload(data ?? null);
+
+        // text shown in assistant bubble
+        const answer =
+          (data && (data.summary || data.answer)) ||
+          "Here are your sales insights.";
+
+        // prefer backend chart_type; if dynamic chart present, hide static
+        const backendChartType = data?.chart_type;
+        if (["monthly", "products", "quarterly"].includes(backendChartType)) {
+          setShowChart(backendChartType);
+        } else if (data?.chart) {
+          setShowChart(null);
+        } else {
+          setShowChart(inferredChart ?? null);
+        }
+
+        return answer;
       } catch (e) {
-        setPending(null);
-        return `Error while creating ticket: ${e?.response?.data || e.message}`;
+        setLastPayload(null);
+        setShowChart(null);
+        const msg = e?.message || "Unknown error";
+        setErrorMsg(msg);
+        return `Chatbot error: ${msg}`;
       }
     },
     []
@@ -248,7 +263,7 @@ export default function App() {
 
   async function handleSend() {
     const text = input.trim();
-    if (!text) return;
+    if (!text || thinking) return; // prevent double submit
 
     setMessages((m) => [...m, { role: "user", content: text }]);
     setInput("");
@@ -259,37 +274,19 @@ export default function App() {
     setMessages((m) => [...m, { role: "assistant", content: result }]);
   }
 
-  async function confirmVersion(choice) {
-    if (!choice) return;
-    try {
-      const data = await requestInstall(pending.user_query, choice);
-      setMessages((m) => [
-        ...m,
-        {
-          role: "assistant",
-          content:
-            `✅ ${data?.message || "Ticket created"} • Incident: ${data?.incident || "N/A"}`,
-        },
-      ]);
-    } catch (e) {
-      setMessages((m) => [
-        ...m,
-        { role: "assistant", content: `❌ Failed: ${e?.response?.data || e.message}` },
-      ]);
-    } finally {
-      // ✅ always hide dropdown after confirm
-      setPending(null);
-    }
-  }
-
   function clearSession() {
     const fresh = [
       { role: "system", content: SYSTEM_RULES },
-      { role: "assistant", content: "Hi! I'm your IT assistant. How can I help you today?" }
+      {
+        role: "assistant",
+        content:
+          "Hi! I’m your Sales Insights assistant. Ask me about sales, revenue, products, or trends.",
+      },
     ];
     setMessages(fresh);
-    setPending(null);
     setShowChart(null);
+    setLastPayload(null);
+    setErrorMsg("");
     localStorage.setItem("chat_history_v1", JSON.stringify(fresh));
   }
 
@@ -299,16 +296,13 @@ export default function App() {
       <header className="bg-gradient-to-r from-blue-600 to-indigo-700 text-white p-4 shadow-md">
         <div className="max-w-4xl mx-auto flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold">IT & Business Assistant</h1>
-            <p className="text-blue-100">How can I help you today?</p>
+            <h1 className="text-2xl font-bold">Sales Insights Assistant</h1>
+            <p className="text-blue-100">Ask me about sales, products, or trends</p>
           </div>
           <button
             onClick={clearSession}
-            className="px-4 py-2 rounded-lg bg-white/20 hover:bg-white/30 text-sm font-medium transition-colors flex items-center gap-1"
+            className="px-4 py-2 rounded-lg bg-white/20 hover:bg-white/30 text-sm font-medium transition-colors"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
             Clear Chat
           </button>
         </div>
@@ -316,56 +310,41 @@ export default function App() {
 
       {/* Chat Container */}
       <div className="flex-1 flex flex-col max-w-4xl mx-auto w-full p-4">
-        {/* Messages */}
         <div className="flex-1 overflow-y-auto rounded-xl bg-white/80 backdrop-blur-sm p-4 shadow-sm mb-4">
+          {/* Error banner */}
+          {errorMsg && (
+            <div className="mb-3 rounded-lg border border-red-200 bg-red-50 text-red-700 px-3 py-2 text-sm">
+              {errorMsg}
+            </div>
+          )}
+
+          {/* Messages */}
           {messages
             .filter((m) => m.role !== "system")
             .map((m, idx) => (
               <ChatMessage key={idx} role={m.role}>
-                <pre className="whitespace-pre-wrap break-words font-sans">{m.content}</pre>
+                <pre className="whitespace-pre-wrap break-words font-sans">
+                  {m.content}
+                </pre>
               </ChatMessage>
             ))}
 
-          {/* Chart display */}
-          {showChart === 'monthly' && (
-            <div className="my-4 p-4 bg-white rounded-lg shadow">
-              <MonthlySalesChart />
-            </div>
-          )}
-          
-          {showChart === 'products' && (
-            <div className="my-4 p-4 bg-white rounded-lg shadow max-w-md mx-auto">
-              <ProductSalesChart />
-            </div>
-          )}
-          
-          {showChart === 'quarterly' && (
-            <div className="my-4 p-4 bg-white rounded-lg shadow">
-              <QuarterlyPerformanceChart />
+          {/* Structured payload (summary + chart + table + sql) */}
+          {lastPayload && (
+            <div className="my-2">
+              <ApiPayloadRenderer payload={lastPayload} />
             </div>
           )}
 
-          {/* Thinking indicator */}
+          {/* Fallback static chart only if backend sent no dynamic chart */}
+          {!lastPayload?.chart && showChart && (
+            <div className="my-4 p-4 bg-white rounded-lg shadow text-sm text-gray-500">
+              A chart will appear when the backend suggests one for “{showChart}”.
+            </div>
+          )}
+
           {thinking && (
-            <div className="flex items-center justify-start my-4">
-              <div className="bg-blue-100 rounded-xl p-4">
-                <div className="flex space-x-2">
-                  <div className="h-2 w-2 bg-blue-400 rounded-full animate-bounce"></div>
-                  <div className="h-2 w-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
-                  <div className="h-2 w-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: '0.4s' }}></div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Version selection dropdown */}
-          {pending?.options?.length > 1 && (
-            <div className="my-4">
-              <PendingInstall
-                options={pending.options}
-                onConfirm={confirmVersion}
-              />
-            </div>
+            <div className="text-sm text-gray-500 my-2">Thinking…</div>
           )}
 
           <div ref={bottomRef} />
@@ -379,30 +358,18 @@ export default function App() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
+              placeholder='e.g., "list top 5 company names"'
             />
             <button
               onClick={handleSend}
               disabled={thinking || input.trim() === ""}
               className="px-5 py-3 rounded-xl bg-blue-600 text-white disabled:opacity-60 hover:bg-blue-700 transition-colors flex items-center justify-center"
             >
-              {thinking ? (
-                <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                </svg>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M10.293 3.293a1 1 0 011.414 0l6 6a1 1 0 010 1.414l-6 6a1 1 0 01-1.414-1.414L14.586 11H3a1 1 0 110-2h11.586l-4.293-4.293a1 1 0 010-1.414z" clipRule="evenodd" />
-                </svg>
-              )}
+              {thinking ? "…" : "Send"}
             </button>
           </div>
-          
         </div>
       </div>
-
-    
-     
     </div>
   );
 }

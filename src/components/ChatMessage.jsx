@@ -1,4 +1,3 @@
-
 import clsx from "clsx";
 
 export default function ChatMessage({ role = "assistant", children }) {
